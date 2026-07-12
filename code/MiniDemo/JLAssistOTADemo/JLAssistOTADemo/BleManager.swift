@@ -17,12 +17,21 @@ class BleManager: NSObject {
 
     static let shared = BleManager()
 
-    let SERVICE_UUID = "AA12"
-    let CHARACTERISTIC_WRITE = "AA13"
-    let CHARACTERISTIC_NOTIFY = "AA14"
+    let PRIMARY_SERVICE_UUID = "AA12"
+    let FALLBACK_SERVICE_UUID = "AE00"
+    let PRIMARY_CHARACTERISTIC_WRITE = "AA13"
+    let FALLBACK_CHARACTERISTIC_WRITE = "AE01"
+    let PRIMARY_CHARACTERISTIC_NOTIFY = "AA14"
+    let FALLBACK_CHARACTERISTIC_NOTIFY = "AE02"
     let CHARACTERISTIC_IMAGE_DATA = "AA15"
     private let lastKnownPeripheralIdentifierKey = "GlassesLastPeripheralIdentifier"
-    private lazy var targetServiceUUID = CBUUID(string: SERVICE_UUID)
+    private lazy var targetServiceUUIDs: [CBUUID] = [
+        CBUUID(string: PRIMARY_SERVICE_UUID),
+        CBUUID(string: FALLBACK_SERVICE_UUID)
+    ]
+    private lazy var targetServiceUUIDStrings: Set<String> = Set(targetServiceUUIDs.map { $0.uuidString.uppercased() })
+    private let writeCharacteristicUUIDs: Set<String> = ["AA13", "AE01"]
+    private let notifyCharacteristicUUIDs: Set<String> = ["AA14", "AE02"]
 
     lazy var centralManager: CBCentralManager = {
         CBCentralManager(delegate: self, queue: nil)
@@ -58,9 +67,9 @@ class BleManager: NSObject {
     private override init() {
         super.init()
         assistManager.mNeedPaired = false
-        assistManager.mService = SERVICE_UUID
-        assistManager.mRcsp_W = CHARACTERISTIC_WRITE
-        assistManager.mRcsp_R = CHARACTERISTIC_NOTIFY
+        assistManager.mService = PRIMARY_SERVICE_UUID
+        assistManager.mRcsp_W = PRIMARY_CHARACTERISTIC_WRITE
+        assistManager.mRcsp_R = PRIMARY_CHARACTERISTIC_NOTIFY
         JLLogManager.logLevel(.DEBUG, content: "BleManager init")
     }
 
@@ -72,11 +81,11 @@ class BleManager: NSObject {
 
         discoverPeripherals.removeAll()
         discoverPeripheralsSubject.accept([])
-        appendLog("开始扫描，仅查找服务 \(SERVICE_UUID) 的眼镜设备")
+        appendLog("开始扫描，仅查找服务 \(PRIMARY_SERVICE_UUID)/\(FALLBACK_SERVICE_UUID) 的眼镜设备")
         connectionStateSubject.accept("扫描中...")
 
         preloadKnownPeripherals()
-        centralManager.scanForPeripherals(withServices: [targetServiceUUID], options: [CBCentralManagerScanOptionAllowDuplicatesKey: false])
+        centralManager.scanForPeripherals(withServices: targetServiceUUIDs, options: [CBCentralManagerScanOptionAllowDuplicatesKey: false])
         scanStopWorkItem?.cancel()
 
         let workItem = DispatchWorkItem { [weak self] in
@@ -164,7 +173,7 @@ class BleManager: NSObject {
     }
 
     private func preloadKnownPeripherals() {
-        let connected = centralManager.retrieveConnectedPeripherals(withServices: [targetServiceUUID])
+        let connected = centralManager.retrieveConnectedPeripherals(withServices: targetServiceUUIDs)
         if !connected.isEmpty {
             appendLog("发现系统已连接候选设备 \(connected.count) 个")
             connected.forEach { addOrUpdateDiscoveredPeripheral($0) }
@@ -329,6 +338,9 @@ extension BleManager: CBPeripheralDelegate {
 
         for service in services {
             appendLog("发现服务: \(service.uuid.uuidString)")
+            if targetServiceUUIDStrings.contains(service.uuid.uuidString.uppercased()) {
+                appendLog("命中眼镜控制服务: \(service.uuid.uuidString)")
+            }
             peripheral.discoverCharacteristics(nil, for: service)
         }
     }
@@ -344,10 +356,10 @@ extension BleManager: CBPeripheralDelegate {
             let uuid = characteristic.uuid.uuidString.uppercased()
             appendLog("特征 \(uuid), properties=\(characteristic.properties.rawValue)")
 
-            if uuid == CHARACTERISTIC_WRITE {
+            if writeCharacteristicUUIDs.contains(uuid) {
                 writeCharacteristic = characteristic
             }
-            if uuid == CHARACTERISTIC_NOTIFY {
+            if notifyCharacteristicUUIDs.contains(uuid) {
                 notifyCharacteristic = characteristic
                 peripheral.setNotifyValue(true, for: characteristic)
             }
@@ -380,7 +392,7 @@ extension BleManager: CBPeripheralDelegate {
         guard let data = characteristic.value else { return }
         packetBuffer.append(data)
         subNotifySubject.onNext(data)
-        appendLog("收到原始数据 \(data.hexString)")
+        appendLog("收到原始数据[\(characteristic.uuid.uuidString.uppercased())] \(data.hexString)")
 
         let packets = GlassesPacketCodec.decodePackets(from: &packetBuffer)
         if packets.isEmpty {
