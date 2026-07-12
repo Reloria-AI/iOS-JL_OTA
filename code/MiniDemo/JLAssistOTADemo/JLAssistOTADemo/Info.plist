@@ -3,7 +3,14 @@
 <plist version="1.0">
 <dict>
 	<key>NSBluetoothAlwaysUsageDescription</key>
-	<string></string>
+	<string>用于扫描并连接 AI 眼镜蓝牙设备。</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>用于访问眼镜开启 AP/P2P 后提供的本地 HTTP 文件服务。</string>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsArbitraryLoads</key>
+		<true/>
+	</dict>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
