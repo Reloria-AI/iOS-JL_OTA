@@ -19,9 +19,11 @@ class ViewController: UIViewController {
     private let contentStack = UIStackView()
     private let stateLabel = UILabel()
     private let latestPacketLabel = UILabel()
+    private let latestFilePathLabel = UILabel()
     private let modeControl = UISegmentedControl(items: ["AP", "P2P"])
     private let rawHexField = UITextField()
     private let logTextView = UITextView()
+    private let previewImageView = UIImageView()
 
     private lazy var scanBtn = makeButton("扫描")
     private lazy var disconnectBtn = makeButton("断开")
@@ -46,9 +48,12 @@ class ViewController: UIViewController {
     private lazy var getVolumeBtn = makeButton("当前音量")
     private lazy var getProjectBtn = makeButton("项目名")
     private lazy var fetchFilesBtn = makeButton("拉文件列表")
+    private lazy var loadThumbnailBtn = makeButton("加载缩略图")
+    private lazy var loadOriginalImageBtn = makeButton("加载原图")
     private lazy var sendRawBtn = makeButton("发原始 Hex")
 
     private let disposeBag = DisposeBag()
+    private var latestFileEntries: [GlassesFileEntry] = []
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -71,6 +76,11 @@ class ViewController: UIViewController {
         latestPacketLabel.numberOfLines = 0
         latestPacketLabel.text = "最近一包: 暂无数据"
 
+        latestFilePathLabel.font = .systemFont(ofSize: 12)
+        latestFilePathLabel.textColor = .secondaryLabel
+        latestFilePathLabel.numberOfLines = 0
+        latestFilePathLabel.text = "最近文件: 暂无"
+
         modeControl.selectedSegmentIndex = 1
 
         rawHexField.borderStyle = .roundedRect
@@ -85,6 +95,12 @@ class ViewController: UIViewController {
         logTextView.layer.borderColor = UIColor.systemGray4.cgColor
         logTextView.layer.borderWidth = 1
         logTextView.text = "等待日志..."
+
+        previewImageView.contentMode = .scaleAspectFit
+        previewImageView.backgroundColor = .secondarySystemBackground
+        previewImageView.layer.cornerRadius = 10
+        previewImageView.clipsToBounds = true
+        previewImageView.image = nil
 
         contentStack.axis = .vertical
         contentStack.spacing = 12
@@ -102,6 +118,7 @@ class ViewController: UIViewController {
 
         contentStack.addArrangedSubview(stateLabel)
         contentStack.addArrangedSubview(latestPacketLabel)
+        contentStack.addArrangedSubview(latestFilePathLabel)
         contentStack.addArrangedSubview(makeRow([scanBtn, disconnectBtn, clearLogBtn]))
         contentStack.addArrangedSubview(makeSectionTitle("扫描结果"))
         contentStack.addArrangedSubview(subTableView)
@@ -113,6 +130,8 @@ class ViewController: UIViewController {
         contentStack.addArrangedSubview(makeRow([getFileCountBtn, getFeaturesBtn, getVolumeBtn]))
         contentStack.addArrangedSubview(makeRow([getProjectBtn]))
         contentStack.addArrangedSubview(makeWiFiRow())
+        contentStack.addArrangedSubview(makeRow([loadThumbnailBtn, loadOriginalImageBtn]))
+        contentStack.addArrangedSubview(previewImageView)
         contentStack.addArrangedSubview(makeSectionTitle("手动发包"))
         contentStack.addArrangedSubview(makeRawSendRow())
         contentStack.addArrangedSubview(makeSectionTitle("日志"))
@@ -139,6 +158,10 @@ class ViewController: UIViewController {
 
         logTextView.snp.makeConstraints { make in
             make.height.equalTo(260)
+        }
+
+        previewImageView.snp.makeConstraints { make in
+            make.height.equalTo(220)
         }
     }
 
@@ -330,12 +353,31 @@ class ViewController: UIViewController {
                     DispatchQueue.main.async {
                         switch result {
                         case .success(let text):
+                            self.latestFileEntries = GlassesHTTPClient.parseFileEntries(from: text)
+                            self.updateLatestFileLabel()
                             BleManager.shared.appendExternalLog("HTTP 文件列表返回:\n\(text)")
+                            if let firstEntry = self.latestFileEntries.first {
+                                BleManager.shared.appendExternalLog("解析到 \(self.latestFileEntries.count) 个文件，最近候选: \(firstEntry.path)")
+                            } else {
+                                BleManager.shared.appendExternalLog("文件列表已返回，但暂未从文本中解析出路径")
+                            }
                         case .failure(let error):
                             BleManager.shared.appendExternalLog("HTTP 文件列表失败: \(error.localizedDescription)")
                         }
                     }
                 }
+            })
+            .disposed(by: disposeBag)
+
+        loadThumbnailBtn.rx.tap
+            .subscribe(onNext: { [weak self] in
+                self?.loadPreviewImage(thumbnail: true)
+            })
+            .disposed(by: disposeBag)
+
+        loadOriginalImageBtn.rx.tap
+            .subscribe(onNext: { [weak self] in
+                self?.loadPreviewImage(thumbnail: false)
             })
             .disposed(by: disposeBag)
 
@@ -362,6 +404,51 @@ class ViewController: UIViewController {
 
     private var selectedWiFiMode: GlassesWiFiMode {
         GlassesWiFiMode(rawValue: modeControl.selectedSegmentIndex) ?? .p2p
+    }
+
+    private func updateLatestFileLabel() {
+        if let entry = preferredPreviewEntry {
+            latestFilePathLabel.text = "最近文件: \(entry.path)"
+        } else {
+            latestFilePathLabel.text = "最近文件: 暂无"
+        }
+    }
+
+    private var preferredPreviewEntry: GlassesFileEntry? {
+        if let image = latestFileEntries.first(where: { $0.mediaType == .image }) {
+            return image
+        }
+        return latestFileEntries.first
+    }
+
+    private func loadPreviewImage(thumbnail: Bool) {
+        guard let entry = preferredPreviewEntry else {
+            BleManager.shared.appendExternalLog("请先成功拉取文件列表，才能加载图片")
+            return
+        }
+
+        let mode = selectedWiFiMode
+        let actionName = thumbnail ? "缩略图" : "原图"
+        BleManager.shared.appendExternalLog("开始加载\(actionName): \(entry.path)")
+
+        let completion: (Result<UIImage, Error>) -> Void = { [weak self] result in
+            DispatchQueue.main.async {
+                switch result {
+                case .success(let image):
+                    self?.previewImageView.image = image
+                    self?.latestFilePathLabel.text = "\(actionName)已加载: \(entry.fileName)"
+                    BleManager.shared.appendExternalLog("\(actionName)加载成功: \(entry.fileName) (\(Int(image.size.width))x\(Int(image.size.height)))")
+                case .failure(let error):
+                    BleManager.shared.appendExternalLog("\(actionName)加载失败: \(error.localizedDescription)")
+                }
+            }
+        }
+
+        if thumbnail {
+            GlassesHTTPClient.shared.downloadThumbnailImage(relativePath: entry.path, mode: mode, completion: completion)
+        } else {
+            GlassesHTTPClient.shared.downloadImage(relativePath: entry.path, mode: mode, completion: completion)
+        }
     }
 
     private func makeButton(_ title: String) -> UIButton {
