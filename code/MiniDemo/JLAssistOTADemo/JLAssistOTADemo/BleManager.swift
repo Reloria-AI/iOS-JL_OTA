@@ -20,7 +20,7 @@ class BleManager: NSObject {
     let SERVICE_UUID = "AA12"
     let CHARACTERISTIC_WRITE = "AA13"
     let CHARACTERISTIC_NOTIFY = "AA14"
-    let CHARACTERISTIC_OTA = "AA15"
+    let CHARACTERISTIC_IMAGE_DATA = "AA15"
 
     lazy var centralManager: CBCentralManager = {
         CBCentralManager(delegate: self, queue: nil)
@@ -51,7 +51,7 @@ class BleManager: NSObject {
     private(set) var currentPeripheral: CBPeripheral?
     private var writeCharacteristic: CBCharacteristic?
     private var notifyCharacteristic: CBCharacteristic?
-    private var otaCharacteristic: CBCharacteristic?
+    private var imageDataCharacteristic: CBCharacteristic?
 
     private override init() {
         super.init()
@@ -165,7 +165,7 @@ class BleManager: NSObject {
         currentPeripheral = nil
         writeCharacteristic = nil
         notifyCharacteristic = nil
-        otaCharacteristic = nil
+        imageDataCharacteristic = nil
         currentUUID = ""
     }
 
@@ -313,8 +313,13 @@ extension BleManager: CBPeripheralDelegate {
                 notifyCharacteristic = characteristic
                 peripheral.setNotifyValue(true, for: characteristic)
             }
-            if uuid == CHARACTERISTIC_OTA {
-                otaCharacteristic = characteristic
+            if uuid == CHARACTERISTIC_IMAGE_DATA {
+                imageDataCharacteristic = characteristic
+                if characteristic.properties.contains(.notify) || characteristic.properties.contains(.indicate) {
+                    peripheral.setNotifyValue(true, for: characteristic)
+                } else if characteristic.properties.contains(.read) {
+                    appendLog("AA15 为读特征，当前等待业务命令触发读取")
+                }
             }
         }
 

@@ -204,7 +204,22 @@ struct GlassesPacket {
     }
 
     var summary: String {
+        if channel == .fileTransfer {
+            switch commandID {
+            case 0x97:
+                return payload.fileInfoDescription
+            case 0x98:
+                return payload.fileChunkDescription
+            case 0x99:
+                return "文件传输结束"
+            default:
+                return "文件通道 cmd=0x\(String(format: "%02X", commandID)) payload=\(payload.hexString)"
+            }
+        }
+
         switch commandID {
+        case 0x17:
+            return payload.batteryStatusDescription
         case 0x25:
             let wifiName = payload.readableASCII ?? payload.hexString
             return "收到 Wi-Fi 名称: \(wifiName)"
@@ -212,7 +227,9 @@ struct GlassesPacket {
             let count = payload.uint16Value
             return "缩略图数量更新: \(count)"
         case 0x45:
-            return "设备状态同步: \(payload.hexString)"
+            return payload.actionSyncDescription
+        case 0x48:
+            return payload.switchStatusDescription
         case 0x46:
             return "语音数据: \(payload.count) bytes"
         case 0x49:
@@ -247,7 +264,17 @@ struct GlassesPacket {
         case 0x97:
             return "开始语音上传"
         case 0x99:
-            return channel == .fileTransfer ? "文件传输结束" : "结束语音上传"
+            return "结束语音上传"
+        case 0x55:
+            return payload.versionDescription
+        case 0x64:
+            return payload.projectAndCustomerDescription
+        case 0x66:
+            return (payload.first ?? 0x00) == 0x01 ? "设备支持直播" : "设备不支持直播"
+        case 0x68:
+            return (payload.first ?? 0x00) == 0x01 ? "设备支持快捷调音量" : "设备不支持快捷调音量"
+        case 0x69:
+            return payload.volumeDescription
         default:
             return "cmd=0x\(String(format: "%02X", commandID)) payload=\(payload.hexString)"
         }
@@ -446,6 +473,111 @@ extension Data {
             features.append("支持快捷调音量")
         }
         return features.isEmpty ? "无已知功能位" : features.joined(separator: "、")
+    }
+
+    var batteryStatusDescription: String {
+        let bytes = [UInt8](self)
+        guard bytes.count >= 3 else { return "电量回复: \(hexString)" }
+
+        let batteryValue: String
+        if let ascii = String(bytes: bytes[0...1], encoding: .ascii), Int(ascii) != nil {
+            batteryValue = "\(ascii)%"
+        } else {
+            batteryValue = "\(bytes[0]) \(bytes[1])"
+        }
+        let charging = bytes[2] == 0x01 ? "充电中" : "未充电"
+        return "设备电量: \(batteryValue), \(charging)"
+    }
+
+    var actionSyncDescription: String {
+        let labels = ["拍照", "录音", "录像", "音量大", "音量小", "点头", "摇头", "音乐播放", "佩戴"]
+        let bytes = [UInt8](self)
+        guard !bytes.isEmpty else { return "设备状态同步: 无数据" }
+
+        var active: [String] = []
+        for (index, label) in labels.enumerated() where bytes.indices.contains(index) {
+            if bytes[index] == 0x01 {
+                active.append(label)
+            }
+        }
+
+        return active.isEmpty ? "设备状态同步: 无动作" : "设备状态同步: " + active.joined(separator: "、")
+    }
+
+    var switchStatusDescription: String {
+        let bytes = [UInt8](self)
+        guard bytes.count >= 8 else { return "开关状态: \(hexString)" }
+
+        let led: String
+        switch bytes[0] {
+        case 0x30:
+            led = "低"
+        case 0x31:
+            led = "中"
+        case 0x32:
+            led = "高"
+        default:
+            led = "未知(\(String(format: "%02X", bytes[0])))"
+        }
+
+        let duration = Int(bytes[1]) << 8 | Int(bytes[2])
+        let wear = bytes[3] == 0x31 ? "开" : "关"
+        let voice = bytes[4] == 0x31 ? "开" : "关"
+        let gesture = String(format: "0x%02X", bytes[5])
+        let orientation = bytes[6] == 0x31 ? "横拍" : "竖拍"
+        let language = bytes[7] == 0x01 ? "英文" : "中文"
+
+        return "开关状态: LED=\(led), 录像时长=\(duration)s, 佩戴检测=\(wear), 语音命令=\(voice), 手势=\(gesture), 方向=\(orientation), 语音=\(language)"
+    }
+
+    var versionDescription: String {
+        let bytes = [UInt8](self)
+        guard bytes.count >= 7 else { return "版本信息: \(hexString)" }
+        return "版本信息: bt_v\(bytes[0]).\(bytes[1]).\(bytes[2]), isp_v\(bytes[3]).\(bytes[4]).\(bytes[5]), hw_v\(bytes[6])"
+    }
+
+    var projectAndCustomerDescription: String {
+        let bytes = [UInt8](self)
+        guard bytes.count >= 8 else { return "项目/客户名: \(hexString)" }
+
+        let projectData = Data(bytes[0..<4])
+        let customerData = Data(bytes[4..<8])
+        let project = projectData.readableASCII ?? projectData.hexString
+        let customer = customerData.readableASCII ?? customerData.hexString
+        return "项目名: \(project), 客户名: \(customer)"
+    }
+
+    var volumeDescription: String {
+        let bytes = [UInt8](self)
+        guard bytes.count >= 3 else { return "当前音量: \(hexString)" }
+        return "当前音量: 系统=\(bytes[0]), 媒体=\(bytes[1]), 通话=\(bytes[2])"
+    }
+
+    var fileInfoDescription: String {
+        let bytes = [UInt8](self)
+        guard bytes.count >= 5 else { return "文件信息: \(hexString)" }
+
+        let totalLength = Int(bytes[0]) << 24 | Int(bytes[1]) << 16 | Int(bytes[2]) << 8 | Int(bytes[3])
+        let type: String
+        switch bytes[4] {
+        case 0x01:
+            type = "图片缩略图"
+        case 0x02:
+            type = "高清图"
+        case 0x03:
+            type = "视频缩略图"
+        default:
+            type = "未知(\(String(format: "%02X", bytes[4])))"
+        }
+        return "文件信息: 类型=\(type), 总长度=\(totalLength) bytes"
+    }
+
+    var fileChunkDescription: String {
+        let bytes = [UInt8](self)
+        guard bytes.count >= 4 else { return "文件数据: \(hexString)" }
+        let address = Int(bytes[0]) << 24 | Int(bytes[1]) << 16 | Int(bytes[2]) << 8 | Int(bytes[3])
+        let chunkLength = bytes.count - 4
+        return "文件数据: 偏移=\(address), 数据长度=\(chunkLength) bytes"
     }
 
     init?(hexString: String) {
