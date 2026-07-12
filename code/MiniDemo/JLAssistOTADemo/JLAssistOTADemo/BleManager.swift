@@ -32,6 +32,18 @@ class BleManager: NSObject {
     private lazy var targetServiceUUIDStrings: Set<String> = Set(targetServiceUUIDs.map { $0.uuidString.uppercased() })
     private let writeCharacteristicUUIDs: Set<String> = ["AA13", "AE01"]
     private let notifyCharacteristicUUIDs: Set<String> = ["AA14", "AE02"]
+    private enum ChannelFamily: String {
+        case aa
+        case ae
+
+        var displayName: String { rawValue.uppercased() }
+    }
+
+    private struct CommandChannel {
+        var write: CBCharacteristic?
+        var notify: CBCharacteristic?
+        var notifyEnabled = false
+    }
 
     lazy var centralManager: CBCentralManager = {
         CBCentralManager(delegate: self, queue: nil)
@@ -63,6 +75,8 @@ class BleManager: NSObject {
     private var writeCharacteristic: CBCharacteristic?
     private var notifyCharacteristic: CBCharacteristic?
     private var imageDataCharacteristic: CBCharacteristic?
+    private var commandChannels: [ChannelFamily: CommandChannel] = [:]
+    private var activeChannelFamily: ChannelFamily?
 
     private override init() {
         super.init()
@@ -149,7 +163,7 @@ class BleManager: NSObject {
     }
 
     private func send(rawData: Data, description: String) {
-        guard let peripheral = currentPeripheral, let writeCharacteristic else {
+        guard let peripheral = currentPeripheral, let writeCharacteristic = activeWriteCharacteristic else {
             appendLog("发送失败，设备未就绪")
             return
         }
@@ -157,7 +171,8 @@ class BleManager: NSObject {
         let writeType: CBCharacteristicWriteType = writeCharacteristic.properties.contains(.writeWithoutResponse) ? .withoutResponse : .withResponse
         peripheral.writeValue(rawData, for: writeCharacteristic, type: writeType)
         latestPacketHexSubject.accept(rawData.hexString)
-        appendLog("发送[\(description)] \(rawData.hexString)")
+        let family = activeChannelFamily?.displayName ?? "UNKNOWN"
+        appendLog("发送[\(description)][\(family):\(writeCharacteristic.uuid.uuidString.uppercased())] \(rawData.hexString)")
     }
 
     private func appendLog(_ message: String) {
@@ -215,12 +230,48 @@ class BleManager: NSObject {
         writeCharacteristic = nil
         notifyCharacteristic = nil
         imageDataCharacteristic = nil
+        commandChannels.removeAll()
+        activeChannelFamily = nil
         currentUUID = ""
     }
 
     private func autoSyncTimeIfPossible() {
-        appendLog("通知通道已就绪，自动发送手机时间")
+        appendLog("命令通知通道已就绪，自动发送手机时间")
         send(preset: .syncTime(Date()))
+    }
+
+    private var activeWriteCharacteristic: CBCharacteristic? {
+        if let activeChannelFamily, let activeWrite = commandChannels[activeChannelFamily]?.write {
+            return activeWrite
+        }
+        return writeCharacteristic
+    }
+
+    private func family(for characteristicUUID: String) -> ChannelFamily? {
+        switch characteristicUUID.uppercased() {
+        case PRIMARY_CHARACTERISTIC_WRITE, PRIMARY_CHARACTERISTIC_NOTIFY:
+            return .aa
+        case FALLBACK_CHARACTERISTIC_WRITE, FALLBACK_CHARACTERISTIC_NOTIFY:
+            return .ae
+        default:
+            return nil
+        }
+    }
+
+    private func updateChannel(_ family: ChannelFamily, mutate: (inout CommandChannel) -> Void) {
+        var channel = commandChannels[family] ?? CommandChannel()
+        mutate(&channel)
+        commandChannels[family] = channel
+    }
+
+    private func activateChannelFamilyIfNeeded(_ family: ChannelFamily) {
+        if activeChannelFamily == nil {
+            activeChannelFamily = family
+            writeCharacteristic = commandChannels[family]?.write
+            notifyCharacteristic = commandChannels[family]?.notify
+            appendLog("选定命令通道: \(family.displayName)")
+            autoSyncTimeIfPossible()
+        }
     }
 
     private func bluetoothStateDescription(_ state: CBManagerState) -> String {
@@ -357,10 +408,20 @@ extension BleManager: CBPeripheralDelegate {
             appendLog("特征 \(uuid), properties=\(characteristic.properties.rawValue)")
 
             if writeCharacteristicUUIDs.contains(uuid) {
-                writeCharacteristic = characteristic
+                if let family = family(for: uuid) {
+                    updateChannel(family) { channel in
+                        channel.write = characteristic
+                    }
+                    appendLog("记录 \(family.displayName) 写通道: \(uuid)")
+                }
             }
             if notifyCharacteristicUUIDs.contains(uuid) {
-                notifyCharacteristic = characteristic
+                if let family = family(for: uuid) {
+                    updateChannel(family) { channel in
+                        channel.notify = characteristic
+                    }
+                    appendLog("准备开启 \(family.displayName) 通知通道: \(uuid)")
+                }
                 peripheral.setNotifyValue(true, for: characteristic)
             }
             if uuid == CHARACTERISTIC_IMAGE_DATA {
@@ -374,7 +435,7 @@ extension BleManager: CBPeripheralDelegate {
         }
 
         if writeCharacteristic == nil {
-            writeCharacteristic = characteristics.first(where: { $0.properties.contains(.write) || $0.properties.contains(.writeWithoutResponse) })
+            writeCharacteristic = activeWriteCharacteristic ?? characteristics.first(where: { $0.properties.contains(.write) || $0.properties.contains(.writeWithoutResponse) })
         }
         if notifyCharacteristic == nil {
             notifyCharacteristic = characteristics.first(where: { $0.properties.contains(.notify) || $0.properties.contains(.indicate) })
@@ -414,9 +475,23 @@ extension BleManager: CBPeripheralDelegate {
 
         guard characteristic.isNotifying else { return }
         appendLog("通知已开启: \(characteristic.uuid.uuidString)")
-        connectionStateSubject.accept("通道就绪: \(peripheral.name ?? peripheral.identifier.uuidString)")
-        subNotifyInitSubject.onNext(peripheral)
-        autoSyncTimeIfPossible()
+        let uuid = characteristic.uuid.uuidString.uppercased()
+        if notifyCharacteristicUUIDs.contains(uuid), let family = family(for: uuid) {
+            updateChannel(family) { channel in
+                channel.notify = characteristic
+                channel.notifyEnabled = true
+            }
+            if let write = commandChannels[family]?.write {
+                writeCharacteristic = write
+            }
+            notifyCharacteristic = characteristic
+            connectionStateSubject.accept("命令通道就绪[\(family.displayName)]: \(peripheral.name ?? peripheral.identifier.uuidString)")
+            subNotifyInitSubject.onNext(peripheral)
+            activateChannelFamilyIfNeeded(family)
+            return
+        }
+
+        connectionStateSubject.accept("附加通道就绪: \(peripheral.name ?? peripheral.identifier.uuidString)")
     }
 
     func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic, error: Error?) {
