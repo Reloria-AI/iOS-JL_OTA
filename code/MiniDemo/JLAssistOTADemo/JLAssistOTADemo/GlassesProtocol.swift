@@ -23,7 +23,29 @@ enum GlassesWiFiMode: Int {
     }
 }
 
+enum GlassesLEDBrightness: UInt8 {
+    case low = 0x30
+    case medium = 0x31
+    case high = 0x32
+
+    var title: String {
+        switch self {
+        case .low:
+            return "低"
+        case .medium:
+            return "中"
+        case .high:
+            return "高"
+        }
+    }
+}
+
 enum GlassesPresetCommand {
+    case setLEDBrightness(GlassesLEDBrightness)
+    case setRecordDuration(seconds: UInt16)
+    case setWearDetection(enabled: Bool)
+    case setVoiceCommand(enabled: Bool)
+    case resetFactorySettings
     case syncTime(Date)
     case getBattery
     case takePhoto(highDefinition: Bool)
@@ -41,6 +63,16 @@ enum GlassesPresetCommand {
 
     var displayName: String {
         switch self {
+        case .setLEDBrightness(let level):
+            return "设置 LED \(level.title)"
+        case .setRecordDuration(let seconds):
+            return "设置录像时长 \(seconds)s"
+        case .setWearDetection(let enabled):
+            return enabled ? "开启佩戴检测" : "关闭佩戴检测"
+        case .setVoiceCommand(let enabled):
+            return enabled ? "开启语音命令" : "关闭语音命令"
+        case .resetFactorySettings:
+            return "恢复出厂设置"
         case .syncTime:
             return "同步手机时间"
         case .getBattery:
@@ -74,6 +106,16 @@ enum GlassesPresetCommand {
 
     var commandID: UInt8 {
         switch self {
+        case .setLEDBrightness:
+            return 0x01
+        case .setRecordDuration:
+            return 0x02
+        case .setWearDetection:
+            return 0x04
+        case .setVoiceCommand:
+            return 0x06
+        case .resetFactorySettings:
+            return 0x14
         case .syncTime:
             return 0x59
         case .getBattery:
@@ -107,6 +149,14 @@ enum GlassesPresetCommand {
 
     var payload: Data {
         switch self {
+        case .setLEDBrightness(let level):
+            return Data([level.rawValue])
+        case .setRecordDuration(let seconds):
+            return Data([UInt8((seconds >> 8) & 0xFF), UInt8(seconds & 0xFF)])
+        case .setWearDetection(let enabled), .setVoiceCommand(let enabled):
+            return Data([enabled ? 0x31 : 0x30])
+        case .resetFactorySettings:
+            return Data([0x00])
         case .syncTime(let date):
             return GlassesPacketCodec.timePayload(for: date)
         case .getBattery:
@@ -219,16 +269,18 @@ enum GlassesPacketCodec {
     }
 
     static func packet(commandID: UInt8, payload: Data) -> Data {
+        // 厂家补充协议说明：长度为 2 字节，内容为 “指令(1) + 数据(N) + 校验(1)”。
+        // 当某命令无数据时，当前仍按文档备注补 0x00，便于设备兼容。
         let normalizedPayload = payload.isEmpty ? Data([0x00]) : payload
-        let length = UInt8(1 + normalizedPayload.count + 1)
+        let length = UInt16(1 + normalizedPayload.count + 1)
         let checksum = checksum(commandID: commandID, payload: normalizedPayload)
         var data = Data()
         data.append(appCommandHeader)
-        data.append(length)
+        data.append(UInt8((length >> 8) & 0xFF))
+        data.append(UInt8(length & 0xFF))
         data.append(commandID)
         data.append(normalizedPayload)
         data.append(checksum)
-        data.append(appCommandFooter)
         return data
     }
 
@@ -305,16 +357,25 @@ enum GlassesPacketCodec {
     }
 
     private static func decodeCommandPacket(from buffer: inout Data, channel: GlassesPacketChannel) -> GlassesPacket? {
-        guard buffer.count >= 7 else { return nil }
+        guard buffer.count >= 6 else { return nil }
         let bytes = [UInt8](buffer)
-        let length = Int(bytes[2])
-        let totalLength = 2 + 1 + length + 2
-        guard buffer.count >= totalLength else { return nil }
+        let length = Int(bytes[2]) << 8 | Int(bytes[3])
+        let bodyTotalLength = 2 + 2 + length
+        guard buffer.count >= bodyTotalLength else { return nil }
+
+        var totalLength = bodyTotalLength
+        if buffer.count >= bodyTotalLength + 2 {
+            let footerBytes = Array(bytes[bodyTotalLength..<(bodyTotalLength + 2)])
+            let expectedFooter = channel == .appCommand ? [UInt8](appCommandFooter) : [UInt8](deviceCommandFooter)
+            if footerBytes == expectedFooter {
+                totalLength += 2
+            }
+        }
 
         let rawData = buffer.prefix(totalLength)
-        let commandID = bytes[3]
-        let checksum = bytes[totalLength - 3]
-        let payloadRange = 4..<(totalLength - 3)
+        let commandID = bytes[4]
+        let checksum = bytes[bodyTotalLength - 1]
+        let payloadRange = 5..<(bodyTotalLength - 1)
         let payload = payloadRange.isEmpty ? Data() : Data(bytes[payloadRange])
 
         buffer.removeFirst(totalLength)

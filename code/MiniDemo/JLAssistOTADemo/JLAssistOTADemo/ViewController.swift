@@ -26,6 +26,10 @@ class ViewController: UIViewController {
     private lazy var scanBtn = makeButton("扫描")
     private lazy var disconnectBtn = makeButton("断开")
     private lazy var clearLogBtn = makeButton("清空日志")
+    private lazy var ledHighBtn = makeButton("LED高")
+    private lazy var record1MinBtn = makeButton("录制1分")
+    private lazy var wearDetectBtn = makeButton("佩戴开")
+    private lazy var voiceOnBtn = makeButton("语音开")
     private lazy var syncTimeBtn = makeButton("同步时间")
     private lazy var getBatteryBtn = makeButton("取电量")
     private lazy var getVersionBtn = makeButton("取版本")
@@ -71,7 +75,7 @@ class ViewController: UIViewController {
 
         rawHexField.borderStyle = .roundedRect
         rawHexField.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
-        rawHexField.placeholder = "输入 Hex，如 AB 55 03 17 00 17 55 AB"
+        rawHexField.placeholder = "输入 Hex，如 AB 55 00 03 17 00 17"
         rawHexField.autocorrectionType = .no
         rawHexField.autocapitalizationType = .allCharacters
 
@@ -101,11 +105,13 @@ class ViewController: UIViewController {
         contentStack.addArrangedSubview(makeRow([scanBtn, disconnectBtn, clearLogBtn]))
         contentStack.addArrangedSubview(makeSectionTitle("扫描结果"))
         contentStack.addArrangedSubview(subTableView)
-        contentStack.addArrangedSubview(makeRow([syncTimeBtn, getBatteryBtn, getVersionBtn]))
-        contentStack.addArrangedSubview(makeRow([takePhotoBtn, hdPhotoBtn, startRecordBtn]))
-        contentStack.addArrangedSubview(makeRow([stopRecordBtn, getDeviceStatusBtn, getSwitchStatusBtn]))
-        contentStack.addArrangedSubview(makeRow([openApBtn, openP2PBtn, getFileCountBtn]))
-        contentStack.addArrangedSubview(makeRow([getFeaturesBtn, getVolumeBtn, getProjectBtn]))
+        contentStack.addArrangedSubview(makeRow([ledHighBtn, record1MinBtn, wearDetectBtn]))
+        contentStack.addArrangedSubview(makeRow([voiceOnBtn, syncTimeBtn, getBatteryBtn]))
+        contentStack.addArrangedSubview(makeRow([getVersionBtn, takePhotoBtn, hdPhotoBtn]))
+        contentStack.addArrangedSubview(makeRow([startRecordBtn, stopRecordBtn, getDeviceStatusBtn]))
+        contentStack.addArrangedSubview(makeRow([getSwitchStatusBtn, openApBtn, openP2PBtn]))
+        contentStack.addArrangedSubview(makeRow([getFileCountBtn, getFeaturesBtn, getVolumeBtn]))
+        contentStack.addArrangedSubview(makeRow([getProjectBtn]))
         contentStack.addArrangedSubview(makeWiFiRow())
         contentStack.addArrangedSubview(makeSectionTitle("手动发包"))
         contentStack.addArrangedSubview(makeRawSendRow())
@@ -198,6 +204,30 @@ class ViewController: UIViewController {
         clearLogBtn.rx.tap
             .subscribe(onNext: {
                 BleManager.shared.clearLogs()
+            })
+            .disposed(by: disposeBag)
+
+        ledHighBtn.rx.tap
+            .subscribe(onNext: {
+                BleManager.shared.send(preset: .setLEDBrightness(.high))
+            })
+            .disposed(by: disposeBag)
+
+        record1MinBtn.rx.tap
+            .subscribe(onNext: {
+                BleManager.shared.send(preset: .setRecordDuration(seconds: 60))
+            })
+            .disposed(by: disposeBag)
+
+        wearDetectBtn.rx.tap
+            .subscribe(onNext: {
+                BleManager.shared.send(preset: .setWearDetection(enabled: true))
+            })
+            .disposed(by: disposeBag)
+
+        voiceOnBtn.rx.tap
+            .subscribe(onNext: {
+                BleManager.shared.send(preset: .setVoiceCommand(enabled: true))
             })
             .disposed(by: disposeBag)
 
