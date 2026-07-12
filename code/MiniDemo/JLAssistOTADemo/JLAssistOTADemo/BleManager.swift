@@ -29,7 +29,6 @@ class BleManager: NSObject {
         CBUUID(string: PRIMARY_SERVICE_UUID),
         CBUUID(string: FALLBACK_SERVICE_UUID)
     ]
-    private lazy var targetServiceUUIDStrings: Set<String> = Set(targetServiceUUIDs.map { $0.uuidString.uppercased() })
     private let writeCharacteristicUUIDs: Set<String> = ["AA13", "AE01"]
     private let notifyCharacteristicUUIDs: Set<String> = ["AA14", "AE02"]
     private enum ChannelFamily: String {
@@ -248,14 +247,26 @@ class BleManager: NSObject {
     }
 
     private func family(for characteristicUUID: String) -> ChannelFamily? {
-        switch characteristicUUID.uppercased() {
-        case PRIMARY_CHARACTERISTIC_WRITE, PRIMARY_CHARACTERISTIC_NOTIFY:
+        switch normalizeUUIDString(characteristicUUID) {
+        case PRIMARY_SERVICE_UUID, PRIMARY_CHARACTERISTIC_WRITE, PRIMARY_CHARACTERISTIC_NOTIFY, CHARACTERISTIC_IMAGE_DATA:
             return .aa
-        case FALLBACK_CHARACTERISTIC_WRITE, FALLBACK_CHARACTERISTIC_NOTIFY:
+        case FALLBACK_SERVICE_UUID, FALLBACK_CHARACTERISTIC_WRITE, FALLBACK_CHARACTERISTIC_NOTIFY:
             return .ae
         default:
             return nil
         }
+    }
+
+    private func normalizeUUIDString(_ uuidString: String) -> String {
+        let uppercased = uuidString.uppercased()
+        let baseSuffix = "-0000-1000-8000-00805F9B34FB"
+        if uppercased.hasSuffix(baseSuffix), uppercased.count >= 8 {
+            let prefix = String(uppercased.prefix(8))
+            if prefix.hasPrefix("0000") {
+                return String(prefix.suffix(4))
+            }
+        }
+        return uppercased
     }
 
     private func updateChannel(_ family: ChannelFamily, mutate: (inout CommandChannel) -> Void) {
@@ -265,11 +276,23 @@ class BleManager: NSObject {
     }
 
     private func activateChannelFamilyIfNeeded(_ family: ChannelFamily) {
-        if activeChannelFamily == nil {
+        let previousFamily = activeChannelFamily
+
+        // 如果 AA 控制通道可用，优先切到 AA；否则沿用第一个成功的家族。
+        if activeChannelFamily == nil || family == .aa {
             activeChannelFamily = family
-            writeCharacteristic = commandChannels[family]?.write
-            notifyCharacteristic = commandChannels[family]?.notify
+        }
+
+        guard activeChannelFamily == family else { return }
+
+        writeCharacteristic = commandChannels[family]?.write
+        notifyCharacteristic = commandChannels[family]?.notify
+
+        if previousFamily == nil {
             appendLog("选定命令通道: \(family.displayName)")
+            autoSyncTimeIfPossible()
+        } else if previousFamily != family {
+            appendLog("切换命令通道: \(previousFamily!.displayName) -> \(family.displayName)")
             autoSyncTimeIfPossible()
         }
     }
@@ -389,7 +412,7 @@ extension BleManager: CBPeripheralDelegate {
 
         for service in services {
             appendLog("发现服务: \(service.uuid.uuidString)")
-            if targetServiceUUIDStrings.contains(service.uuid.uuidString.uppercased()) {
+            if let family = family(for: service.uuid.uuidString), family == .aa || family == .ae {
                 appendLog("命中眼镜控制服务: \(service.uuid.uuidString)")
             }
             peripheral.discoverCharacteristics(nil, for: service)
@@ -404,7 +427,8 @@ extension BleManager: CBPeripheralDelegate {
         guard let characteristics = service.characteristics else { return }
 
         for characteristic in characteristics {
-            let uuid = characteristic.uuid.uuidString.uppercased()
+            let originalUUID = characteristic.uuid.uuidString.uppercased()
+            let uuid = normalizeUUIDString(originalUUID)
             appendLog("特征 \(uuid), properties=\(characteristic.properties.rawValue)")
 
             if writeCharacteristicUUIDs.contains(uuid) {
@@ -475,7 +499,7 @@ extension BleManager: CBPeripheralDelegate {
 
         guard characteristic.isNotifying else { return }
         appendLog("通知已开启: \(characteristic.uuid.uuidString)")
-        let uuid = characteristic.uuid.uuidString.uppercased()
+        let uuid = normalizeUUIDString(characteristic.uuid.uuidString)
         if notifyCharacteristicUUIDs.contains(uuid), let family = family(for: uuid) {
             updateChannel(family) { channel in
                 channel.notify = characteristic
