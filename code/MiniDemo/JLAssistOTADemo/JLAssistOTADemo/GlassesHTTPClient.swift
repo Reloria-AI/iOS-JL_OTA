@@ -181,36 +181,66 @@ final class GlassesHTTPClient {
     }
 
     static func parseFileEntries(from response: String) -> [GlassesFileEntry] {
-        let pattern = #"(/?DCIM/[^"'\\\s<>()]+\.(?:jpg|jpeg|png|bmp|gif|webp|heic|mp4|mov|avi))"#
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
-            return []
-        }
-
-        let nsResponse = response as NSString
-        let matches = regex.matches(in: response, range: NSRange(location: 0, length: nsResponse.length))
-
         var seen = Set<String>()
         var entries: [GlassesFileEntry] = []
 
-        for match in matches {
-            let rawPath = nsResponse.substring(with: match.range(at: 1))
-            let path = rawPath.hasPrefix("/") ? rawPath : "/\(rawPath)"
-            let normalized = path.lowercased()
-            guard !seen.contains(normalized) else { continue }
-            seen.insert(normalized)
-
-            let mediaType: GlassesFileEntry.MediaType
-            if normalized.hasSuffix(".jpg") || normalized.hasSuffix(".jpeg") || normalized.hasSuffix(".png") || normalized.hasSuffix(".bmp") || normalized.hasSuffix(".gif") || normalized.hasSuffix(".webp") || normalized.hasSuffix(".heic") {
-                mediaType = .image
-            } else if normalized.hasSuffix(".mp4") || normalized.hasSuffix(".mov") || normalized.hasSuffix(".avi") {
-                mediaType = .video
-            } else {
-                mediaType = .unknown
+        let xmlPathPattern = #"<FPATH>\s*([^<]+)\s*</FPATH>"#
+        if let regex = try? NSRegularExpression(pattern: xmlPathPattern, options: [.caseInsensitive]) {
+            let nsResponse = response as NSString
+            let matches = regex.matches(in: response, range: NSRange(location: 0, length: nsResponse.length))
+            for match in matches {
+                let rawPath = nsResponse.substring(with: match.range(at: 1))
+                if let entry = normalizedEntry(from: rawPath), !seen.contains(entry.path.lowercased()) {
+                    seen.insert(entry.path.lowercased())
+                    entries.append(entry)
+                }
             }
+        }
 
-            entries.append(GlassesFileEntry(path: path, mediaType: mediaType))
+        if !entries.isEmpty {
+            return entries
+        }
+
+        let plainPathPattern = #"(/?DCIM[\\/][^"'\\\s<>()]+\.(?:jpg|jpeg|png|bmp|gif|webp|heic|mp4|mov|avi))"#
+        if let regex = try? NSRegularExpression(pattern: plainPathPattern, options: [.caseInsensitive]) {
+            let nsResponse = response as NSString
+            let matches = regex.matches(in: response, range: NSRange(location: 0, length: nsResponse.length))
+            for match in matches {
+                let rawPath = nsResponse.substring(with: match.range(at: 1))
+                if let entry = normalizedEntry(from: rawPath), !seen.contains(entry.path.lowercased()) {
+                    seen.insert(entry.path.lowercased())
+                    entries.append(entry)
+                }
+            }
         }
 
         return entries
+    }
+
+    private static func normalizedEntry(from rawPath: String) -> GlassesFileEntry? {
+        var cleaned = rawPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty else { return nil }
+
+        cleaned = cleaned.replacingOccurrences(of: "\\", with: "/")
+        if cleaned.hasPrefix("A:/") || cleaned.hasPrefix("a:/") {
+            cleaned.removeFirst(2)
+        }
+        if let range = cleaned.range(of: "DCIM/", options: [.caseInsensitive]) {
+            cleaned = "/" + cleaned[range.lowerBound...]
+        } else if !cleaned.hasPrefix("/") {
+            cleaned = "/" + cleaned
+        }
+
+        let normalized = cleaned.lowercased()
+        let mediaType: GlassesFileEntry.MediaType
+        if normalized.hasSuffix(".jpg") || normalized.hasSuffix(".jpeg") || normalized.hasSuffix(".png") || normalized.hasSuffix(".bmp") || normalized.hasSuffix(".gif") || normalized.hasSuffix(".webp") || normalized.hasSuffix(".heic") {
+            mediaType = .image
+        } else if normalized.hasSuffix(".mp4") || normalized.hasSuffix(".mov") || normalized.hasSuffix(".avi") {
+            mediaType = .video
+        } else {
+            mediaType = .unknown
+        }
+
+        return GlassesFileEntry(path: cleaned, mediaType: mediaType)
     }
 }
