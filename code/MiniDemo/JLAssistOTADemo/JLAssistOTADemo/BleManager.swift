@@ -21,6 +21,8 @@ class BleManager: NSObject {
     let CHARACTERISTIC_WRITE = "AA13"
     let CHARACTERISTIC_NOTIFY = "AA14"
     let CHARACTERISTIC_IMAGE_DATA = "AA15"
+    private let lastKnownPeripheralIdentifierKey = "GlassesLastPeripheralIdentifier"
+    private lazy var targetServiceUUID = CBUUID(string: SERVICE_UUID)
 
     lazy var centralManager: CBCentralManager = {
         CBCentralManager(delegate: self, queue: nil)
@@ -70,10 +72,11 @@ class BleManager: NSObject {
 
         discoverPeripherals.removeAll()
         discoverPeripheralsSubject.accept([])
-        appendLog("开始扫描，目标服务 \(SERVICE_UUID)")
+        appendLog("开始扫描，仅查找服务 \(SERVICE_UUID) 的眼镜设备")
         connectionStateSubject.accept("扫描中...")
 
-        centralManager.scanForPeripherals(withServices: nil, options: [CBCentralManagerScanOptionAllowDuplicatesKey: false])
+        preloadKnownPeripherals()
+        centralManager.scanForPeripherals(withServices: [targetServiceUUID], options: [CBCentralManagerScanOptionAllowDuplicatesKey: false])
         scanStopWorkItem?.cancel()
 
         let workItem = DispatchWorkItem { [weak self] in
@@ -160,6 +163,43 @@ class BleManager: NSObject {
         logLinesSubject.accept(lines)
     }
 
+    private func preloadKnownPeripherals() {
+        let connected = centralManager.retrieveConnectedPeripherals(withServices: [targetServiceUUID])
+        if !connected.isEmpty {
+            appendLog("发现系统已连接候选设备 \(connected.count) 个")
+            connected.forEach { addOrUpdateDiscoveredPeripheral($0) }
+        }
+
+        if let uuidString = UserDefaults.standard.string(forKey: lastKnownPeripheralIdentifierKey),
+           let uuid = UUID(uuidString: uuidString) {
+            let remembered = centralManager.retrievePeripherals(withIdentifiers: [uuid])
+            if !remembered.isEmpty {
+                appendLog("找回上次连接过的眼镜 \(remembered.count) 个")
+                remembered.forEach { addOrUpdateDiscoveredPeripheral($0) }
+            }
+        }
+    }
+
+    private func addOrUpdateDiscoveredPeripheral(_ peripheral: CBPeripheral) {
+        discoverPeripherals.removeAll(where: { $0.identifier == peripheral.identifier })
+        discoverPeripherals.append(peripheral)
+
+        if let rememberedUUID = UserDefaults.standard.string(forKey: lastKnownPeripheralIdentifierKey) {
+            discoverPeripherals.sort { lhs, rhs in
+                let lhsRemembered = lhs.identifier.uuidString == rememberedUUID
+                let rhsRemembered = rhs.identifier.uuidString == rememberedUUID
+                if lhsRemembered != rhsRemembered {
+                    return lhsRemembered
+                }
+                return (lhs.name ?? "") < (rhs.name ?? "")
+            }
+        } else {
+            discoverPeripherals.sort { ($0.name ?? "") < ($1.name ?? "") }
+        }
+
+        discoverPeripheralsSubject.accept(discoverPeripherals)
+    }
+
     private func resetConnectionContext() {
         packetBuffer.removeAll(keepingCapacity: true)
         currentPeripheral = nil
@@ -232,10 +272,7 @@ extension BleManager: CBCentralManagerDelegate {
         let displayName = peripheral.name ?? advertisementData[CBAdvertisementDataLocalNameKey] as? String ?? "Unnamed"
         appendLog("发现设备: \(displayName) RSSI=\(RSSI)")
 
-        discoverPeripherals.removeAll(where: { $0.identifier == peripheral.identifier })
-        discoverPeripherals.append(peripheral)
-        discoverPeripherals.sort { ($0.name ?? "") < ($1.name ?? "") }
-        discoverPeripheralsSubject.accept(discoverPeripherals)
+        addOrUpdateDiscoveredPeripheral(peripheral)
 
         if let reconnectUUID, peripheral.identifier.uuidString == reconnectUUID {
             self.reconnectUUID = nil
@@ -257,6 +294,7 @@ extension BleManager: CBCentralManagerDelegate {
         appendLog("连接设备成功: \(peripheral.name ?? peripheral.identifier.uuidString)")
         connectionStateSubject.accept("已连接: \(peripheral.name ?? peripheral.identifier.uuidString)")
         currentUUID = peripheral.identifier.uuidString
+        UserDefaults.standard.set(peripheral.identifier.uuidString, forKey: lastKnownPeripheralIdentifierKey)
         currentPeripheral = peripheral
         peripheral.delegate = self
         peripheral.discoverServices(nil)
